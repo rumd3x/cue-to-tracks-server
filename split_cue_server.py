@@ -20,6 +20,7 @@ import threading
 import queue
 import signal
 import time
+import chardet
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
@@ -30,14 +31,80 @@ results = {}
 lock = threading.Lock()
 shutdown_event = threading.Event()
 
-def run_command(cmd, logfile):
-    with open(logfile, "a") as f:
-        f.write(f"\n$ {' '.join(cmd)}\n")
+def safe_print(msg):
+    """Print with handling for surrogate characters that can't be encoded"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # Replace problematic characters with safe representation
+        safe_msg = msg.encode('utf-8', errors='replace').decode('utf-8')
+        print(safe_msg)
+    sys.stdout.flush()
+
+def run_command(cmd, logfile, env=None):
+    with open(logfile, "a", encoding="utf-8", errors="replace") as f:
+        # Handle potential encoding issues in command strings
+        try:
+            cmd_str = ' '.join(str(c) for c in cmd)
+        except UnicodeEncodeError:
+            # If there are encoding issues, use repr() to show the command safely
+            cmd_str = ' '.join(repr(c) for c in cmd)
+        
+        f.write(f"\n$ {cmd_str}\n")
         f.flush()
-        result = subprocess.run(cmd, stdout=f, stderr=f, check=False)
+        result = subprocess.run(cmd, stdout=f, stderr=f, check=False, env=env)
         f.write(f"[Exit code: {result.returncode}]\n")
         f.flush()
         return result.returncode
+
+
+def ensure_utf8_cue(cue_path, log_func):
+    """
+    Ensure CUE file is in UTF-8 encoding. If not, create a temporary UTF-8 version.
+    Returns: (path_to_utf8_cue, is_temporary)
+    """
+    try:
+        # Detect encoding
+        with open(cue_path, 'rb') as f:
+            raw_data = f.read()
+            result = chardet.detect(raw_data)
+            if result is None:
+                log_func(f"⚠️ Could not detect encoding, using original file")
+                return cue_path, False
+                
+            detected_encoding = result.get('encoding')
+            confidence = result.get('confidence', 0)
+        
+        if not detected_encoding:
+            log_func(f"⚠️ Could not detect encoding, using original file")
+            return cue_path, False
+            
+        log_func(f"📝 CUE file encoding detected: {detected_encoding} (confidence: {confidence:.2%})")
+        
+        # If already UTF-8, no conversion needed
+        if detected_encoding.upper() in ('UTF-8', 'ASCII'):
+            log_func(f"✅ CUE file is already {detected_encoding}, no conversion needed")
+            return cue_path, False
+        
+        # Convert to UTF-8
+        log_func(f"🔄 Converting CUE file from {detected_encoding} to UTF-8...")
+        temp_cue = cue_path + '.utf8.cue'
+        
+        # Read with detected encoding
+        with open(cue_path, 'r', encoding=detected_encoding) as f:
+            content = f.read()
+        
+        # Write as UTF-8
+        with open(temp_cue, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        log_func(f"✅ Created UTF-8 CUE file: {os.path.basename(temp_cue)}")
+        return temp_cue, True
+        
+    except Exception as e:
+        log_func(f"⚠️ Failed to detect/convert CUE encoding: {e}")
+        log_func(f"ℹ️ Using original CUE file as-is")
+        return cue_path, False
 
 
 def find_album_cover(album_path, log_func):
@@ -61,11 +128,11 @@ def find_album_cover(album_path, log_func):
                 file_lower = file.lower()
                 file_path = os.path.join(root, file)
                 
-                # Priority 1: Images with "front" in the name
-                if "front" in file_lower:
+                if "front" in file_lower or file_lower in ["f", "jc"]:
                     front_images.append(file_path)
-                # Skip images with back, side, or inner
-                elif not any(word in file_lower for word in ["back", "side", "inner"]):
+                elif "cover" in file_lower or "poster" in file_lower or "scan" in file_lower:
+                    front_images.append(file_path)
+                elif not any(word in file_lower for word in ["back", "side", "inner"]): # Skip images with back, side, or inner
                     other_images.append(file_path)
     
     # Return first front image if found
@@ -88,6 +155,10 @@ def find_cue_image_pairs(root_path):
     """
     Recursively search for CUE + image file pairs in root_path and all subdirectories.
     Returns a list of tuples: [(cue_path, image_path, containing_dir), ...]
+    
+    Handles cases where CUE files include the image extension in their name:
+    - Normal: "album.cue" + "album.flac"
+    - With extension: "album.flac.cue" + "album.flac"
     """
     pairs = []
     image_extensions = [".ape", ".flac", ".wav", ".wv"]
@@ -102,11 +173,26 @@ def find_cue_image_pairs(root_path):
             
             # Look for matching image file with same base name
             image_file = None
+            
+            # Strategy 1: Direct match (base_name + image_extension)
+            # Works for: "album.cue" + "album.flac"
             for ext in image_extensions:
                 candidate = os.path.join(dirpath, base_name + ext)
                 if os.path.exists(candidate):
                     image_file = candidate
                     break
+            
+            # Strategy 2: If base_name already ends with an image extension,
+            # the image file might be the base_name itself
+            # Works for: "album.flac.cue" + "album.flac"
+            if not image_file:
+                base_name_lower = base_name.lower()
+                for ext in image_extensions:
+                    if base_name_lower.endswith(ext):
+                        candidate = os.path.join(dirpath, base_name)
+                        if os.path.exists(candidate):
+                            image_file = candidate
+                            break
             
             if image_file:
                 pairs.append((cue_path, image_file, dirpath))
@@ -126,9 +212,9 @@ def split_and_encode(album_path, no_cleanup=False, output_format="flac", job_id=
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         formatted_msg = f"[{timestamp}] [{job_id}] {msg}"
         with log_lock:
-            print(formatted_msg)
-            sys.stdout.flush()
-            with open(logfile, "a") as f:
+            # Use safe_print to handle surrogate characters
+            safe_print(formatted_msg)
+            with open(logfile, "a", encoding="utf-8", errors="replace") as f:
                 f.write(formatted_msg + "\n")
                 f.flush()
 
@@ -232,6 +318,9 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
             return {"status": "error", "message": error_msg, "log": logfile, "command": "ffmpeg"}
         log(f"{log_prefix} ✅ Conversion completed successfully")
 
+        # Ensure CUE file is in UTF-8 to handle accented characters properly
+        utf8_cue_path, is_temp_cue = ensure_utf8_cue(cue_path, lambda msg: log(f"{log_prefix} {msg}"))
+
         log(f"{log_prefix} ✂️ Splitting {os.path.basename(wav_path)} using CUE sheet...")
         # Prepare output format specification
         output_spec = ""
@@ -244,19 +333,26 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         
         # Change to working directory so shnsplit creates files in the right place
         original_cwd = os.getcwd()
+        # Set UTF-8 locale for subprocess to handle accented characters
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C.UTF-8'
+        env['LANG'] = 'C.UTF-8'
+        
         try:
             os.chdir(working_dir)
             # Use relative paths since we're now in the working directory
-            exit_code = run_command(["shnsplit", "-f", os.path.basename(cue_path), "-O", "never", "-o", output_spec, "-t", "%n. %t", os.path.basename(wav_path)], logfile)
+            exit_code = run_command(["shnsplit", "-f", os.path.basename(utf8_cue_path), "-O", "never", "-o", output_spec, "-t", "%n. %t", os.path.basename(wav_path)], logfile, env=env)
         finally:
             os.chdir(original_cwd)
         
         if exit_code != 0:
             error_msg = f"shnsplit failed with exit code {exit_code}"
             log(f"{log_prefix} ❌ {error_msg}")
-            log(f"{log_prefix} 📋 Command: shnsplit -f {cue_path} -o {output_format} {working_dir}/track%02d {wav_path}")
+            log(f"{log_prefix} 📋 Command: shnsplit -f {utf8_cue_path} -o {output_format} {working_dir}/track%02d {wav_path}")
             log(f"{log_prefix} 📄 Full log available at: {logfile}")
-            # Clean up temp WAV file before returning
+            # Clean up temp files before returning
+            if is_temp_cue and os.path.exists(utf8_cue_path):
+                os.remove(utf8_cue_path)
             if os.path.exists(wav_path):
                 log(f"{log_prefix} 🗑️ Cleaning up temporary WAV file: {os.path.basename(wav_path)}")
                 os.remove(wav_path)
@@ -267,18 +363,24 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         track_files = [os.path.join(working_dir, f) for f in sorted(os.listdir(working_dir)) if f.lower().endswith(f".{output_format}")]
         log(f"{log_prefix} 📊 Found {len(track_files)} track(s) to tag")
         if track_files:
-            exit_code = run_command(["cuetag", cue_path] + track_files, logfile)
-            if exit_code != 0:
-                error_msg = f"cuetag failed with exit code {exit_code}"
-                log(f"{log_prefix} ❌ {error_msg}")
-                log(f"{log_prefix} 📋 Command: cuetag {cue_path} [track files...]")
-                log(f"{log_prefix} 📄 Full log available at: {logfile}")
-                # Clean up temp WAV file before returning
-                if os.path.exists(wav_path):
-                    log(f"{log_prefix} 🗑️ Cleaning up temporary WAV file: {os.path.basename(wav_path)}")
-                    os.remove(wav_path)
-                return {"status": "error", "message": error_msg, "log": logfile, "command": "cuetag"}
-            log(f"{log_prefix} ✅ Tagging completed successfully")
+            # Process tracks one by one to avoid issues with special characters in batch processing
+            failed_tags = []
+            for track_file in track_files:
+                exit_code = run_command(["cuetag", utf8_cue_path, track_file], logfile, env=env)
+                if exit_code != 0:
+                    failed_tags.append(os.path.basename(track_file))
+            
+            if failed_tags:
+                error_msg = f"cuetag failed for {len(failed_tags)} track(s): {', '.join(failed_tags)}"
+                log(f"{log_prefix} ⚠️ {error_msg}")
+                # Continue processing even if tagging fails for some tracks
+            else:
+                log(f"{log_prefix} ✅ Tagging completed successfully")
+        
+        # Clean up temporary UTF-8 CUE file if created (after tagging)
+        if is_temp_cue and os.path.exists(utf8_cue_path):
+            log(f"{log_prefix} 🗑️ Cleaning up temporary UTF-8 CUE file")
+            os.remove(utf8_cue_path)
 
         # Find album cover image
         cover_image = find_album_cover(working_dir, log)
@@ -364,20 +466,17 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
 
 
 def worker_thread(args, thread_id):
-    print(f"[Worker {thread_id}] Thread started")
-    sys.stdout.flush()
+    safe_print(f"[Worker {thread_id}] Thread started")
     
     while not shutdown_event.is_set():
         try:
             task = task_queue.get(timeout=1)
             if task is None:
-                print(f"[Worker {thread_id}] Received shutdown signal")
-                sys.stdout.flush()
+                safe_print(f"[Worker {thread_id}] Received shutdown signal")
                 break
             
             job_id, path = task
-            print(f"[Worker {thread_id}] Processing job {job_id}: {path}")
-            sys.stdout.flush()
+            safe_print(f"[Worker {thread_id}] Processing job {job_id}: {path}")
             
             with lock:
                 results[job_id]["status"] = "processing"
@@ -387,22 +486,19 @@ def worker_thread(args, thread_id):
             with lock:
                 results[job_id].update(result)
             
-            print(f"[Worker {thread_id}] Completed job {job_id} with status: {result['status']}")
-            sys.stdout.flush()
+            safe_print(f"[Worker {thread_id}] Completed job {job_id} with status: {result['status']}")
             
             task_queue.task_done()
         except queue.Empty:
             continue
     
-    print(f"[Worker {thread_id}] Thread stopped")
-    sys.stdout.flush()
+    safe_print(f"[Worker {thread_id}] Thread stopped")
 
 
 class CueSplitHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Override to provide more detailed logging"""
-        print(f"[HTTP] {self.address_string()} - {format % args}")
-        sys.stdout.flush()
+        safe_print(f"[HTTP] {self.address_string()} - {format % args}")
     
     def _json(self, data, code=200):
         self.send_response(code)
@@ -418,15 +514,13 @@ class CueSplitHandler(BaseHTTPRequestHandler):
                 data = json.loads(body)
                 path = data["path"]
             except Exception as e:
-                print(f"❌ Invalid request: {e}")
-                sys.stdout.flush()
+                safe_print(f"❌ Invalid request: {e}")
                 return self._json({"error": "invalid json"}, 400)
 
             job_id = str(len(results) + 1)
             results[job_id] = {"status": "queued", "path": path}
             task_queue.put((job_id, path))
-            print(f"📥 New job queued: {job_id} for path: {path}")
-            sys.stdout.flush()
+            safe_print(f"📥 New job queued: {job_id} for path: {path}")
             return self._json({"job_id": job_id, "status": "queued"})
 
         self._json({"error": "unknown endpoint"}, 404)
@@ -450,36 +544,41 @@ class CueSplitHandler(BaseHTTPRequestHandler):
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
     signal_name = signal.Signals(signum).name
-    print(f"\n🛑 Received {signal_name} signal, initiating graceful shutdown...")
-    sys.stdout.flush()
+    safe_print(f"\n🛑 Received {signal_name} signal, initiating graceful shutdown...")
     shutdown_event.set()
 
 
 def main():
+    # Read defaults from environment variables
+    env_threads = int(os.environ.get("THREADS", str(os.cpu_count())))
+    env_pair_threads = os.environ.get("PAIR_THREADS")
+    env_pair_threads = int(env_pair_threads) if env_pair_threads else None
+    env_format = os.environ.get("FORMAT", "flac")
+    env_no_cleanup = os.environ.get("NO_CLEANUP", "false").lower() in ("true", "1", "yes")
+    
     parser = argparse.ArgumentParser(description="CUE Splitter HTTP Daemon")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP server port (default: 8080)")
-    parser.add_argument("--threads", type=int, default=os.cpu_count(), help="Number of job worker threads (default: CPU count)")
-    parser.add_argument("--pair-threads", type=int, default=None, help="Max parallel pair processing within a job (default: auto)")
-    parser.add_argument("--format", choices=["flac", "mp3", "aac"], default="flac", help="Output audio format (default: flac)")
-    parser.add_argument("--no-cleanup", action="store_true", help="Keep original CUE and image files after processing")
+    parser.add_argument("--port", type=int, default=8080, help=f"HTTP server port (default: 8080)")
+    parser.add_argument("--threads", type=int, default=env_threads, help=f"Number of job worker threads (default: {env_threads}, env: THREADS)")
+    parser.add_argument("--pair-threads", type=int, default=env_pair_threads, help=f"Max parallel pair processing within a job (default: auto, env: PAIR_THREADS)")
+    parser.add_argument("--format", choices=["flac", "mp3", "aac"], default=env_format, help=f"Output audio format (default: {env_format}, env: FORMAT)")
+    parser.add_argument("--no-cleanup", action="store_true", default=env_no_cleanup, help=f"Keep original CUE and image files after processing (default: {env_no_cleanup}, env: NO_CLEANUP)")
     args = parser.parse_args()
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    print("=" * 60)
-    print("🎵 CUE Splitter HTTP Daemon")
-    print("=" * 60)
-    print(f"📋 Configuration:")
-    print(f"   Port: {args.port}")
-    print(f"   Job worker threads: {args.threads}")
-    print(f"   Pair processing threads: {args.pair_threads if args.pair_threads else 'auto (CPU count)'}")
-    print(f"   Output format: {args.format}")
-    print(f"   Cleanup enabled: {not args.no_cleanup}")
-    print(f"   Log directory: /tmp/cue_split_logs")
-    print("=" * 60)
-    sys.stdout.flush()
+    safe_print("=" * 60)
+    safe_print("🎵 CUE Splitter HTTP Daemon")
+    safe_print("=" * 60)
+    safe_print(f"📋 Configuration:")
+    safe_print(f"   Port: {args.port}")
+    safe_print(f"   Job worker threads: {args.threads}")
+    safe_print(f"   Pair processing threads: {args.pair_threads if args.pair_threads else 'auto (CPU count)'}")
+    safe_print(f"   Output format: {args.format}")
+    safe_print(f"   Cleanup enabled: {not args.no_cleanup}")
+    safe_print(f"   Log directory: /tmp/cue_split_logs")
+    safe_print("=" * 60)
 
     # Start worker threads
     threads = []
@@ -488,34 +587,29 @@ def main():
         t.start()
         threads.append(t)
     
-    print(f"✅ Started {args.threads} worker thread(s)")
-    sys.stdout.flush()
+    safe_print(f"✅ Started {args.threads} worker thread(s)")
 
     server = HTTPServer(("0.0.0.0", args.port), CueSplitHandler)
     server.timeout = 1.0  # Poll every second to check shutdown_event
     
-    print(f"🚀 Server listening on 0.0.0.0:{args.port}")
-    print("📡 API Endpoints:")
-    print("   POST /process    - Submit a new CUE split job")
-    print("   GET  /status     - Check status of all jobs")
-    print("   GET  /log/<id>   - Retrieve log for specific job")
-    print("=" * 60)
-    print("🟢 Server is ready to accept requests")
-    sys.stdout.flush()
+    safe_print(f"🚀 Server listening on 0.0.0.0:{args.port}")
+    safe_print("📡 API Endpoints:")
+    safe_print("   POST /process    - Submit a new CUE split job")
+    safe_print("   GET  /status     - Check status of all jobs")
+    safe_print("   GET  /log/<id>   - Retrieve log for specific job")
+    safe_print("=" * 60)
+    safe_print("🟢 Server is ready to accept requests")
 
     try:
         while not shutdown_event.is_set():
             server.handle_request()  # Will timeout after 1 second if no request
     except KeyboardInterrupt:
-        print("\n🛑 Keyboard interrupt received...")
-        sys.stdout.flush()
+        safe_print("\n🛑 Keyboard interrupt received...")
     finally:
-        print("🔄 Shutting down server...")
-        sys.stdout.flush()
+        safe_print("🔄 Shutting down server...")
         server.server_close()
         
-        print(f"⏳ Waiting for {args.threads} worker thread(s) to finish...")
-        sys.stdout.flush()
+        safe_print(f"⏳ Waiting for {args.threads} worker thread(s) to finish...")
         
         # Signal all workers to stop
         for _ in range(args.threads):
@@ -525,13 +619,11 @@ def main():
         for i, thread in enumerate(threads, 1):
             thread.join(timeout=5)
             if thread.is_alive():
-                print(f"⚠️ Worker {i} did not stop gracefully")
+                safe_print(f"⚠️ Worker {i} did not stop gracefully")
             else:
-                print(f"✅ Worker {i} stopped")
-            sys.stdout.flush()
+                safe_print(f"✅ Worker {i} stopped")
         
-        print("👋 Shutdown complete")
-        sys.stdout.flush()
+        safe_print("👋 Shutdown complete")
 
 
 if __name__ == "__main__":

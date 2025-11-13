@@ -38,6 +38,19 @@ A multi-threaded HTTP daemon for processing CUE sheet + audio image file pairs. 
 
 ### Docker (Recommended)
 
+**Note:** A pre-built public image is available at `edmur/cue-to-tracks-server:latest` if you don't want to build the image yourself.
+
+#### Using Pre-built Image
+
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -v /path/to/music:/music \
+  edmur/cue-to-tracks-server:latest
+```
+
+#### Building the Image
+
 ```bash
 docker build . -t cue-splitter
 docker run -d -p 8080:8080 -v /path/to/music:/music cue-splitter
@@ -167,12 +180,37 @@ Detailed logs for each job are stored in `/tmp/cue_split_logs/<job_id>.log` and 
 
 The included Dockerfile creates a lightweight container with all dependencies pre-installed. Mount your music directory as a volume to process files.
 
+### Environment Variables
+
+The Docker image supports configuration via environment variables:
+
+- `THREADS`: Number of job worker threads (default: `4`)
+- `PAIR_THREADS`: Max parallel pair processing within a job (default: `2`)
+- `FORMAT`: Output audio format - `flac`, `mp3`, or `aac` (default: `flac`)
+- `NO_CLEANUP`: Keep original CUE and image files after processing - `true` or `false` (default: `false`)
+
+### Docker Run Examples
+
+Basic usage:
 ```bash
 docker run -d \
   -p 8080:8080 \
   -v /path/to/music:/music \
   --name cue-splitter \
-  cue-splitter --threads 4 --format flac
+  edmur/cue-to-tracks-server:latest
+```
+
+With custom configuration using environment variables:
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -v /path/to/music:/music \
+  -e THREADS=8 \
+  -e PAIR_THREADS=4 \
+  -e FORMAT=mp3 \
+  -e NO_CLEANUP=true \
+  --name cue-splitter \
+  edmur/cue-to-tracks-server:latest
 ```
 
 ## License
