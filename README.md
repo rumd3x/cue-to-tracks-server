@@ -26,38 +26,58 @@ A multi-threaded HTTP daemon for processing CUE sheet + audio image file pairs. 
 - **MP3**: 320 kbps CBR
 - **AAC**: 256 kbps
 
-## Requirements
-
-- Python 3.12+
-- ffmpeg
-- cuetools
-- shntool
-- flac
-
 ## Installation
 
 ### Docker (Recommended)
 
-**Note:** A pre-built public image is available at `edmur/cue-to-tracks-server:latest` if you don't want to build the image yourself.
+<details>
+  <summary>Click to expand</summary>
 
-#### Using Pre-built Image
+#### Environment Variables
 
+The Docker image supports configuration via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `THREADS` | Number of job worker threads | `4` |
+| `PAIR_THREADS` | Max parallel pair processing within a job | `2` |
+| `FORMAT` | Output audio format - `flac`, `mp3`, or `aac` | `flac` |
+| `NO_CLEANUP` | Keep original CUE and image files after processing - `true` or `false` | `false` |
+
+With custom configuration using environment variables:
 ```bash
+docker build . -t cue-splitter
+
 docker run -d \
   -p 8080:8080 \
   -v /path/to/music:/music \
-  edmur/cue-to-tracks-server:latest
+  -e THREADS=8 \
+  -e PAIR_THREADS=4 \
+  -e FORMAT=mp3 \
+  -e NO_CLEANUP=true \
+  --name cue-splitter \
+  cue-splitter
 ```
 
-#### Building the Image
+**Note:** A pre-built public image is available at `edmur/cue-to-tracks-server:latest` if you don't want to build the image yourself.
 
 ```bash
-docker build . -t cue-splitter
-docker run -d -p 8080:8080 -v /path/to/music:/music cue-splitter
+docker run -d -p 8080:8080 -v /path/to/music:/music edmur/cue-to-tracks-server:latest
 ```
+</details>
+
 
 ### Manual Installation
 
+<details>
+  <summary>Click to expand</summary>
+#### Requirements
+
+- Python 3
+- ffmpeg
+- cuetools
+- shntool
+- flac
 ```bash
 # Install dependencies (Debian/Ubuntu)
 apt-get install ffmpeg cuetools shntool flac python3
@@ -81,6 +101,7 @@ python3 split_cue_server.py [OPTIONS]
 - `--pair-threads <N>`: Max parallel pair processing within a job (default: auto)
 - `--format <FORMAT>`: Output audio format: flac, mp3, or aac (default: flac)
 - `--no-cleanup`: Keep original CUE and image files after processing
+</details>
 
 ### API Endpoints
 
@@ -88,11 +109,16 @@ python3 split_cue_server.py [OPTIONS]
 
 ```bash
 POST /process
-Content-Type: application/json
+```
 
-{
-  "path": "/path/to/album/directory"
-}
+<details>
+  <summary>Click to expand</summary>
+
+```bash
+# Submit a job to process an album
+curl -X POST http://localhost:8080/process \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/music/Artist - Album"}'
 ```
 
 **Response:**
@@ -102,28 +128,66 @@ Content-Type: application/json
   "status": "queued"
 }
 ```
+</details>
 
-#### Check Job Status
+#### Check all Jobs Status
+
 
 ```bash
 GET /status
+```
+<details>
+  <summary>Click to expand</summary>
+
+```bash
+curl http://localhost:8080/status
 ```
 
 **Response:**
 ```json
 {
   "1": {
+    "status": "error",
+    "path": "/data/Downloads/out/lidarr/Iron Maiden - 1980 - Iron Maiden (Japanese TOCP-50691)",
+    "message": "all 1 pair(s) failed",
+    "log": "/tmp/cue_split_logs/1.log",
+    "details": [
+      {
+      "status": "error",
+      "message": "shnsplit failed with exit code 1",
+      "log": "/tmp/cue_split_logs/1.log",
+      "command": "shnsplit"
+      }
+    ]
+  },
+  "2": {
     "status": "success",
-    "path": "/path/to/album",
-    "log": "/tmp/cue_split_logs/1.log"
+    "path": "/data/Downloads/out/lidarr/Iron Maiden - 1981- Killers (TOCP-53757, 2006)",
+    "log": "/tmp/cue_split_logs/3.log",
+    "details": [
+      {
+      "status": "success",
+      "log": "/tmp/cue_split_logs/3.log"
+      }
+    ]
   }
 }
 ```
+</details>
 
 #### Get Job Log
 
+
+  
 ```bash
 GET /log/<job_id>
+```
+
+<details>
+  <summary>Click to expand</summary>
+
+```bash
+curl http://localhost:8080/log/1
 ```
 
 **Response:**
@@ -133,21 +197,7 @@ GET /log/<job_id>
   "log": "..."
 }
 ```
-
-### Example
-
-```bash
-# Submit a job to process an album
-curl -X POST http://localhost:8080/process \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/music/Artist - Album"}'
-
-# Check all job statuses
-curl http://localhost:8080/status
-
-# Get log for job ID 1
-curl http://localhost:8080/log/1
-```
+</details>
 
 ## How It Works
 
@@ -179,39 +229,6 @@ Detailed logs for each job are stored in `/tmp/cue_split_logs/<job_id>.log` and 
 ## Docker Configuration
 
 The included Dockerfile creates a lightweight container with all dependencies pre-installed. Mount your music directory as a volume to process files.
-
-### Environment Variables
-
-The Docker image supports configuration via environment variables:
-
-- `THREADS`: Number of job worker threads (default: `4`)
-- `PAIR_THREADS`: Max parallel pair processing within a job (default: `2`)
-- `FORMAT`: Output audio format - `flac`, `mp3`, or `aac` (default: `flac`)
-- `NO_CLEANUP`: Keep original CUE and image files after processing - `true` or `false` (default: `false`)
-
-### Docker Run Examples
-
-Basic usage:
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -v /path/to/music:/music \
-  --name cue-splitter \
-  edmur/cue-to-tracks-server:latest
-```
-
-With custom configuration using environment variables:
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -v /path/to/music:/music \
-  -e THREADS=8 \
-  -e PAIR_THREADS=4 \
-  -e FORMAT=mp3 \
-  -e NO_CLEANUP=true \
-  --name cue-splitter \
-  edmur/cue-to-tracks-server:latest
-```
 
 ## License
 
