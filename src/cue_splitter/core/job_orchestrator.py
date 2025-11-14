@@ -47,7 +47,7 @@ def split_and_encode(album_path, no_cleanup=False, output_format="flac",
         
         # Search recursively for CUE + image pairs
         log(f"🔍 Searching for CUE + image file pairs in {album_path} and subdirectories...")
-        pairs = find_cue_image_pairs(album_path)
+        pairs = find_cue_image_pairs(album_path, log_func=log)
         
         if not pairs:
             log("❌ No CUE + image file pairs found.")

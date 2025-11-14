@@ -13,22 +13,47 @@ A multi-threaded HTTP daemon for processing CUE sheet + audio image file pairs. 
 - 📊 **Job Management**: HTTP API for submitting jobs and checking status
 - 🐳 **Docker Ready**: Includes Dockerfile for containerized deployment
 
-## Supported Input Formats
+## How It Works
+
+1. **Search**: Recursively scans the provided directory for CUE+image file pairs
+2. **Convert**: Converts audio image files (APE/FLAC/WAV/WV) to WAV format
+3. **Split**: Uses CUE sheet to split WAV into individual tracks
+4. **Tag**: Applies metadata from CUE sheet to each track
+5. **Optimize**: Re-encodes with optimal compression and embeds album art
+6. **Cleanup**: (Optional) Removes original CUE and image files
+
+### Supported Input Formats
 
 - APE (Monkey's Audio)
 - FLAC
 - WAV
 - WavPack (WV)
 
-## Output Formats
+### Output Formats
 
 - **FLAC**: Compression level 8 (default)
 - **MP3**: 320 kbps CBR
 - **AAC**: 256 kbps
 
+## Usage
+
+### Starting the Server
+
+```bash
+python3 main.py [OPTIONS]
+```
+
+#### Options
+
+- `--port <PORT>`: HTTP server port (default: 8080)
+- `--threads <N>`: Number of job worker threads (default: CPU count)
+- `--pair-threads <N>`: Max parallel pair processing within a job (default: auto)
+- `--format <FORMAT>`: Output audio format: flac, mp3, or aac (default: flac)
+- `--no-cleanup`: Keep original CUE and image files after processing
+
 ## Installation
 
-### Docker (Recommended)
+### 🐳 Docker (Recommended)
 
 The dockerized version is a lightweight container with all dependencies pre-installed. Mount your music directory as a volume and process your albums.
 
@@ -66,10 +91,13 @@ docker run -d \
 ```bash
 docker run -d -p 8080:8080 -v /path/to/music:/music edmur/cue-to-tracks-server:latest
 ```
+
+---
+
 </details>
 
 
-### Manual Installation
+### ⚡ Manual Installation (Advanced)
 
 <details>
   <summary>Click to expand</summary>
@@ -92,24 +120,11 @@ pip3 install -r requirements.txt
 python3 main.py
 ```
 
-## Usage
+---
 
-### Starting the Server
-
-```bash
-python3 main.py [OPTIONS]
-```
-
-#### Options
-
-- `--port <PORT>`: HTTP server port (default: 8080)
-- `--threads <N>`: Number of job worker threads (default: CPU count)
-- `--pair-threads <N>`: Max parallel pair processing within a job (default: auto)
-- `--format <FORMAT>`: Output audio format: flac, mp3, or aac (default: flac)
-- `--no-cleanup`: Keep original CUE and image files after processing
 </details>
 
-### API Endpoints
+## API Endpoints
 
 #### Submit a Job
 
@@ -135,6 +150,8 @@ curl -X POST http://localhost:8080/process \
 }
 ```
 </details>
+
+---
 
 #### Check all Jobs Status
 
@@ -181,6 +198,8 @@ curl http://localhost:8080/status
 ```
 </details>
 
+---
+
 #### Get Job Log
 
 
@@ -204,37 +223,6 @@ curl http://localhost:8080/log/1
 }
 ```
 </details>
-
-## How It Works
-
-1. **Search**: Recursively scans the provided directory for CUE+image file pairs
-2. **Convert**: Converts audio image files (APE/FLAC/WAV/WV) to WAV format
-3. **Split**: Uses CUE sheet to split WAV into individual tracks
-4. **Tag**: Applies metadata from CUE sheet to each track
-5. **Optimize**: Re-encodes with optimal compression and embeds album art
-6. **Cleanup**: (Optional) Removes original CUE and image files
-
-## Album Art Detection
-
-The tool automatically searches for album cover images with the following priority:
-
-1. Images with "front" in the filename (case insensitive)
-2. First image without "back", "side", or "inner" in the filename
-
-Supported image formats: JPG, PNG, BMP, GIF, TIFF, WebP
-
-## Logging
-
-Detailed logs for each job are stored in `/tmp/cue_split_logs/<job_id>.log` and include:
-
-- Processing steps and timestamps
-- Command outputs
-- Error messages and stack traces
-- Optimization statistics
-
-## License
-
-MIT
 
 ## Contributing
 

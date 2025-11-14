@@ -29,7 +29,24 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         Dictionary with status and details
     """
     try:
-        base_name = os.path.splitext(os.path.basename(cue_path))[0]
+        base_name = os.path.splitext(os.path.basename(image_file))[0]
+        
+        # Determine output folder name
+        # If this is a split CUE (e.g., "album_part1.cue"), use the base name without "_part"
+        cue_basename = os.path.basename(cue_path)
+        if "_part" in cue_basename:
+            # Extract base name from CUE file (e.g., "album_part1.cue" -> "album")
+            output_folder_name = cue_basename.split("_part")[0]
+        else:
+            # Use the image file's base name
+            output_folder_name = base_name
+        
+        # Create output directory
+        output_dir = os.path.join(working_dir, output_folder_name)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            log(f"{log_prefix} 📁 Using output directory: {output_folder_name}")
+        
         wav_path = os.path.join(working_dir, base_name + ".temp.wav")
 
         # Step 1: Convert image to WAV
@@ -56,11 +73,12 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
 
         # Step 3: Split WAV using CUE sheet
         log(f"{log_prefix} ✂️ Splitting {os.path.basename(wav_path)} using CUE sheet...")
+        log(f"{log_prefix}    Output directory: {output_folder_name}/")
         
         # Prepare output format specification
         output_spec = _get_output_spec(output_format)
         
-        # Change to working directory so shnsplit creates files in the right place
+        # Change to output directory so shnsplit creates files in the right place
         original_cwd = os.getcwd()
         # Set UTF-8 locale for subprocess to handle accented characters
         env = os.environ.copy()
@@ -68,12 +86,14 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         env['LANG'] = 'C.UTF-8'
         
         try:
-            os.chdir(working_dir)
-            # Use relative paths since we're now in the working directory
+            os.chdir(output_dir)
+            # Use relative paths for CUE and WAV files
+            relative_cue = os.path.join("..", os.path.basename(utf8_cue_path))
+            relative_wav = os.path.join("..", os.path.basename(wav_path))
             exit_code = run_command(
-                ["shnsplit", "-f", os.path.basename(utf8_cue_path), 
+                ["shnsplit", "-f", relative_cue, 
                  "-O", "never", "-o", output_spec, "-t", "%n. %t", 
-                 os.path.basename(wav_path)], 
+                 relative_wav], 
                 logfile, env=env
             )
         finally:
@@ -92,8 +112,8 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         # Step 4: Tag tracks with metadata from CUE
         log(f"{log_prefix} 🎧 Tagging tracks with metadata from CUE...")
         track_files = [
-            os.path.join(working_dir, f) 
-            for f in sorted(os.listdir(working_dir)) 
+            os.path.join(output_dir, f) 
+            for f in sorted(os.listdir(output_dir)) 
             if f.lower().endswith(f".{output_format}")
         ]
         log(f"{log_prefix} 📊 Found {len(track_files)} track(s) to tag")
@@ -117,7 +137,7 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
         # Step 6: Optimize compression and embed album art
         log(f"{log_prefix} 🧠 Optimizing compression and embedding album art...")
         optimization_result = _optimize_tracks(
-            working_dir, output_format, cover_image, log, logfile, log_prefix
+            output_dir, output_format, cover_image, log, logfile, log_prefix
         )
         
         if optimization_result["status"] != "success":
@@ -136,6 +156,29 @@ def process_single_pair(cue_path, image_file, working_dir, no_cleanup, output_fo
             log(f"{log_prefix} 🧹 Cleaning up source files...")
             log(f"{log_prefix}   🗑️ Removing CUE file: {os.path.basename(cue_path)}")
             os.remove(cue_path)
+            
+            # If this is a split CUE file (from multi-image CUE), also clean up the original
+            cue_basename = os.path.basename(cue_path)
+            if "_part" in cue_basename:
+                # Extract original CUE filename (e.g., "album_part1.cue" -> "album.cue")
+                original_cue_name = cue_basename.split("_part")[0] + ".cue"
+                original_cue_path = os.path.join(working_dir, original_cue_name)
+                
+                # Only remove original if all split parts are being processed
+                # For now, we'll remove it when processing any part
+                if os.path.exists(original_cue_path):
+                    # Check if there are any other split parts remaining
+                    remaining_parts = [
+                        f for f in os.listdir(working_dir)
+                        if f.startswith(cue_basename.split("_part")[0] + "_part") 
+                        and f.endswith(".cue")
+                        and f != cue_basename
+                    ]
+                    
+                    if not remaining_parts:
+                        log(f"{log_prefix}   🗑️ Removing original multi-image CUE: {original_cue_name}")
+                        os.remove(original_cue_path)
+            
             if os.path.exists(image_file):
                 log(f"{log_prefix}   🗑️ Removing image file: {os.path.basename(image_file)}")
                 os.remove(image_file)
