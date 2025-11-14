@@ -13,8 +13,12 @@ RUN apt-get update && apt-get install -y \
     ffmpeg cuetools shntool flac locales && \
     rm -rf /var/lib/apt/lists/*
 
-COPY . /app
-RUN pip install -r requirements.txt
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY main.py .
 
 EXPOSE 8080
-ENTRYPOINT ["python3", "/app/split_cue_server.py"]
+ENTRYPOINT ["python3", "/app/main.py"]

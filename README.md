@@ -30,6 +30,8 @@ A multi-threaded HTTP daemon for processing CUE sheet + audio image file pairs. 
 
 ### Docker (Recommended)
 
+The dockerized version is a lightweight container with all dependencies pre-installed. Mount your music directory as a volume and process your albums.
+
 <details>
   <summary>Click to expand</summary>
 
@@ -71,6 +73,7 @@ docker run -d -p 8080:8080 -v /path/to/music:/music edmur/cue-to-tracks-server:l
 
 <details>
   <summary>Click to expand</summary>
+  
 #### Requirements
 
 - Python 3
@@ -80,10 +83,13 @@ docker run -d -p 8080:8080 -v /path/to/music:/music edmur/cue-to-tracks-server:l
 - flac
 ```bash
 # Install dependencies (Debian/Ubuntu)
-apt-get install ffmpeg cuetools shntool flac python3
+apt-get install ffmpeg cuetools shntool flac python3 python3-pip
+
+# Install Python dependencies
+pip3 install -r requirements.txt
 
 # Run the server
-python3 split_cue_server.py
+python3 main.py
 ```
 
 ## Usage
@@ -91,7 +97,7 @@ python3 split_cue_server.py
 ### Starting the Server
 
 ```bash
-python3 split_cue_server.py [OPTIONS]
+python3 main.py [OPTIONS]
 ```
 
 #### Options
@@ -225,10 +231,6 @@ Detailed logs for each job are stored in `/tmp/cue_split_logs/<job_id>.log` and 
 - Command outputs
 - Error messages and stack traces
 - Optimization statistics
-
-## Docker Configuration
-
-The included Dockerfile creates a lightweight container with all dependencies pre-installed. Mount your music directory as a volume to process files.
 
 ## License
 
