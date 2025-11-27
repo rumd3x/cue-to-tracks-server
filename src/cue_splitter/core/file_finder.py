@@ -4,40 +4,77 @@ import re
 import cueparser
 
 
-def _split_multi_image_cue(cue_path, referenced_files, log_func):
+def _parse_cue_file(cue_path):
+    """
+    Parse a CUE file using cueparser library.
+    
+    Args:
+        cue_path: Path to the CUE file
+        
+    Returns:
+        CueSheet object if successful, None otherwise
+    """
+    try:
+        cue_sheet = cueparser.CueSheet()
+        cue_sheet.setOutputFormat('', '')
+        
+        with open(cue_path, 'r', encoding='utf-8', errors='ignore') as f:
+            cue_sheet.setData(f.read())
+            cue_sheet.parse()
+        
+        return cue_sheet
+    except Exception:
+        return None
+
+
+def _extract_audio_files_from_cuesheet(cue_sheet):
+    """
+    Extract all audio file names from a parsed CueSheet.
+    
+    Args:
+        cue_sheet: Parsed CueSheet object
+        
+    Returns:
+        List of audio file names referenced in FILE directives
+    """
+    file_pattern = re.compile(r'^FILE\s+"([^"]+)"\s+', re.IGNORECASE)
+    audio_files = []
+    
+    for line in cue_sheet.data:
+        match = file_pattern.match(line)
+        if match:
+            audio_files.append(match.group(1))
+    
+    return audio_files
+
+
+def _split_multi_image_cue(cue_path, cue_sheet, audio_files, log_func):
     """
     Split a CUE file that references multiple audio files into separate CUE files.
     
     Args:
         cue_path: Path to the original CUE file
-        referenced_files: List of audio file names referenced in the CUE
+        cue_sheet: Parsed CueSheet object
+        audio_files: List of audio file names referenced in the CUE
         log_func: Function to call for logging messages
         
     Returns:
         List of tuples: [(new_cue_path, audio_file_name), ...]
     """
     try:
-        # Read the original CUE file
-        with open(cue_path, 'r', encoding='utf-8', errors='ignore') as f:
-            cue_content = f.read()
-        
         cue_dir = os.path.dirname(cue_path)
         cue_basename = os.path.splitext(os.path.basename(cue_path))[0]
-        
         created_cues = []
-        
-        # Parse CUE content into lines
-        lines = cue_content.split('\n')
         
         # Find global metadata (before first FILE directive)
         global_metadata = []
         file_sections = {}
         current_file = None
         current_section = []
+        file_pattern = re.compile(r'^\s*FILE\s+"([^"]+)"\s+(\w+)', re.IGNORECASE)
         
-        for line in lines:
-            # Check if this is a FILE directive
-            file_match = re.match(r'^\s*FILE\s+"([^"]+)"\s+(\w+)', line, re.IGNORECASE)
+        for line in cue_sheet.data:
+            file_match = file_pattern.match(line)
             
             if file_match:
                 # Save previous section if exists
@@ -59,13 +96,13 @@ def _split_multi_image_cue(cue_path, referenced_files, log_func):
             file_sections[current_file] = current_section
         
         # Create separate CUE files for each audio file
-        for i, audio_file in enumerate(referenced_files, 1):
+        for i, audio_file in enumerate(audio_files, 1):
             if audio_file not in file_sections:
                 log_func(f"    ⚠️  Audio file {audio_file} not found in parsed CUE sections")
                 continue
             
             # Generate new CUE filename
-            if len(referenced_files) > 1:
+            if len(audio_files) > 1:
                 new_cue_name = f"{cue_basename}_part{i}.cue"
             else:
                 new_cue_name = f"{cue_basename}.cue"
@@ -139,6 +176,208 @@ def find_album_cover(album_path, log_func):
     return None
 
 
+def _extract_referenced_files_from_cue(cue_path, log_func):
+    """
+    Parse a CUE file and extract the audio files referenced in FILE directives.
+    
+    Args:
+        cue_path: Path to the CUE file
+        log_func: Function to call for logging messages
+        
+    Returns:
+        Tuple of (CueSheet object, list of audio file names), or (None, None) if parsing fails
+    """
+    try:
+        cue_sheet = _parse_cue_file(cue_path)
+        if not cue_sheet:
+            log_func(f"    ⚠️  Error parsing CUE file")
+            return None, None
+        
+        audio_files = _extract_audio_files_from_cuesheet(cue_sheet)
+        return cue_sheet, audio_files if audio_files else None
+        
+    except Exception as e:
+        log_func(f"    ⚠️  Error parsing CUE file: {str(e)}")
+        return None, None
+
+
+def _find_audio_file(audio_file_name, dirpath, filenames):
+    """
+    Locate an audio file in the directory, trying exact match first, then case-insensitive.
+    
+    Args:
+        audio_file_name: Name of the audio file to find
+        dirpath: Directory to search in
+        filenames: List of files in the directory
+        
+    Returns:
+        Full path to the audio file if found, None otherwise
+    """
+    # Try exact match first
+    audio_file_path = os.path.join(dirpath, audio_file_name)
+    if os.path.exists(audio_file_path):
+        return audio_file_path
+    
+    # Try case-insensitive search (for Linux compatibility)
+    for existing_file in filenames:
+        if existing_file.lower() == audio_file_name.lower():
+            return os.path.join(dirpath, existing_file)
+    
+    return None
+
+
+def _find_audio_file_fallback(cue_path, dirpath, filenames, log_func):
+    """
+    Try to find an audio file matching the CUE file when the FILE directive fails.
+    
+    Fallback strategies:
+    1. Try cue_basename + audio extensions (e.g., album.cue -> album.flac)
+    2. If CUE filename ends with audio extension (e.g., album.flac.cue),
+       try removing .cue (e.g., album.flac)
+    
+    Args:
+        cue_path: Path to the CUE file
+        dirpath: Directory containing the CUE file
+        filenames: List of files in the directory
+        log_func: Function to call for logging messages
+        
+    Returns:
+        Path to audio file if found, None otherwise
+    """
+    audio_extensions = [".ape", ".flac", ".wav", ".wv"]
+    cue_filename = os.path.basename(cue_path)
+    cue_basename = os.path.splitext(cue_filename)[0]
+    
+    # Fallback 1: Try cue_basename + audio extensions
+    log_func(f"    🔍 Fallback: Trying to find audio file with same name as CUE...")
+    for ext in audio_extensions:
+        candidate = cue_basename + ext
+        candidate_path = os.path.join(dirpath, candidate)
+        
+        if os.path.exists(candidate_path):
+            log_func(f"    ✅ Found matching audio file: {candidate}")
+            return candidate_path
+        
+        # Try case-insensitive match
+        for existing_file in filenames:
+            if existing_file.lower() == candidate.lower():
+                audio_file_path = os.path.join(dirpath, existing_file)
+                log_func(f"    ✅ Found matching audio file (case-insensitive): {existing_file}")
+                return audio_file_path
+    
+    # Fallback 2: Check if CUE filename already ends with an audio extension
+    for ext in audio_extensions:
+        if cue_basename.lower().endswith(ext.lower()):
+            candidate = cue_basename
+            candidate_path = os.path.join(dirpath, candidate)
+            
+            log_func(f"    🔍 Fallback: CUE name ends with audio extension, trying {candidate}...")
+            
+            if os.path.exists(candidate_path):
+                log_func(f"    ✅ Found matching audio file: {candidate}")
+                return candidate_path
+            
+            # Try case-insensitive match
+            for existing_file in filenames:
+                if existing_file.lower() == candidate.lower():
+                    audio_file_path = os.path.join(dirpath, existing_file)
+                    log_func(f"    ✅ Found matching audio file (case-insensitive): {existing_file}")
+                    return audio_file_path
+    
+    log_func(f"    ❌ Could not find audio file through fallback methods")
+    return None
+
+
+def _match_audio_file_with_fallback(cue_path, audio_file_name, dirpath, filenames, log_func):
+    """
+    Try to match an audio file, with fallback strategies if not found directly.
+    
+    Args:
+        cue_path: Path to the CUE file
+        audio_file_name: Name of the audio file referenced in the CUE
+        dirpath: Directory containing the files
+        filenames: List of files in the directory
+        log_func: Function to call for logging messages
+        
+    Returns:
+        Path to the matched audio file, or None if not found
+    """
+    # Try to find the audio file directly
+    audio_file_path = _find_audio_file(audio_file_name, dirpath, filenames)
+    
+    if audio_file_path:
+        return audio_file_path
+    
+    # If not found, try fallback methods
+    return _find_audio_file_fallback(cue_path, dirpath, filenames, log_func)
+
+
+def _process_multi_image_cue(cue_path, cue_sheet, audio_files, dirpath, filenames, log_func):
+    """
+    Process a CUE file that references multiple audio files.
+    
+    Splits the multi-image CUE into separate single-image CUE files and matches
+    each with its corresponding audio file.
+    
+    Args:
+        cue_path: Path to the original CUE file
+        cue_sheet: Parsed CueSheet object
+        audio_files: List of audio file names referenced in the CUE
+        dirpath: Directory containing the CUE file
+        filenames: List of files in the directory
+        log_func: Function to call for logging messages
+        
+    Returns:
+        List of tuples: [(cue_path, audio_path, dirpath), ...]
+    """
+    pairs = []
+    log_func(f"    🔪 Multi-image CUE detected! Creating separate CUE files...")
+    created_cues = _split_multi_image_cue(cue_path, cue_sheet, audio_files, log_func)
+    
+    for new_cue_path, audio_file_name in created_cues:
+        audio_file_path = _match_audio_file_with_fallback(
+            new_cue_path, audio_file_name, dirpath, filenames, log_func
+        )
+        
+        if audio_file_path:
+            pairs.append((new_cue_path, audio_file_path, dirpath))
+        else:
+            log_func(f"    ❌ Audio file not found: {audio_file_name}")
+    
+    return pairs
+
+
+def _process_single_image_cue(cue_path, cue_file, audio_file_name, dirpath, filenames, log_func):
+    """
+    Process a CUE file that references a single audio file.
+    
+    Args:
+        cue_path: Path to the CUE file
+        cue_file: Name of the CUE file (for logging)
+        audio_file_name: Name of the audio file referenced in the CUE
+        dirpath: Directory containing the CUE file
+        filenames: List of files in the directory
+        log_func: Function to call for logging messages
+        
+    Returns:
+        Tuple (cue_path, audio_path, dirpath) if matched, None otherwise
+    """
+    audio_file_path = _find_audio_file(audio_file_name, dirpath, filenames)
+    
+    if audio_file_path:
+        log_func(f"    ✅ Matched: {cue_file} → {audio_file_name}")
+        return (cue_path, audio_file_path, dirpath)
+    
+    # Try fallback methods
+    audio_file_path = _find_audio_file_fallback(cue_path, dirpath, filenames, log_func)
+    
+    if audio_file_path:
+        return (cue_path, audio_file_path, dirpath)
+    
+    log_func(f"    ❌ Audio file not found: {audio_file_name}")
+    return None
+
+
 def find_cue_image_pairs(root_path, log_func=None):
     """
     Recursively search for CUE + image file pairs in root_path and all subdirectories.
@@ -160,17 +399,12 @@ def find_cue_image_pairs(root_path, log_func=None):
         one for each audio file, with each pair referencing a newly created single-image
         CUE file (e.g., "album_part1.cue", "album_part2.cue").
     """
-    # Default no-op logging function
     if log_func is None:
         log_func = lambda msg: None
     
     pairs = []
-    # Regex pattern to match FILE directives in CUE files
-    # Matches: FILE "filename.ext" WAVE (or other format)
-    file_pattern = re.compile(r'^FILE\s+"([^"]+)"\s+', re.MULTILINE | re.IGNORECASE)
     
     for dirpath, dirnames, filenames in os.walk(root_path):
-        # Find all CUE files in this directory
         cue_files = [f for f in filenames if f.lower().endswith(".cue")]
         
         if cue_files:
@@ -181,73 +415,28 @@ def find_cue_image_pairs(root_path, log_func=None):
             cue_path = os.path.join(dirpath, cue_file)
             log_func(f"  📄 Found CUE file: {cue_file}")
             
-            try:
-                # Parse the CUE file using cueparser
-                cue_sheet = cueparser.CueSheet()
-                cue_sheet.setOutputFormat('', '')  # Set empty output formats
-                
-                with open(cue_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    cue_content = f.read()
-                    cue_sheet.setData(cue_content)
-                    cue_sheet.parse()
-                
-                # Extract FILE directives from the parsed data
-                referenced_files = []
-                for line in cue_sheet.data:
-                    match = file_pattern.match(line)
-                    if match:
-                        referenced_files.append(match.group(1))
-                
-                if not referenced_files:
-                    log_func(f"    ⚠️  No FILE directives found in {cue_file}")
-                    continue
-                
-                log_func(f"    🔗 Found {len(referenced_files)} audio file reference(s) in CUE")
-                
-                # Check if we need to split the CUE file (multiple images)
-                if len(referenced_files) > 1:
-                    log_func(f"    🔪 Multi-image CUE detected! Creating separate CUE files...")
-                    created_cues = _split_multi_image_cue(cue_path, referenced_files, log_func)
-                    
-                    # Now add pairs using the newly created CUE files
-                    for new_cue_path, audio_file_name in created_cues:
-                        # The file path in CUE is relative to the CUE file location
-                        audio_file_path = os.path.join(dirpath, audio_file_name)
-                        
-                        if os.path.exists(audio_file_path):
-                            pairs.append((new_cue_path, audio_file_path, dirpath))
-                        # If not found directly, try case-insensitive search (for Linux compatibility)
-                        else:
-                            for existing_file in filenames:
-                                if existing_file.lower() == audio_file_name.lower():
-                                    audio_file_path = os.path.join(dirpath, existing_file)
-                                    pairs.append((new_cue_path, audio_file_path, dirpath))
-                                    break
-                else:
-                    # Single image CUE - use original logic
-                    audio_file_name = referenced_files[0]
-                    # The file path in CUE is relative to the CUE file location
-                    audio_file_path = os.path.join(dirpath, audio_file_name)
-                    
-                    if os.path.exists(audio_file_path):
-                        pairs.append((cue_path, audio_file_path, dirpath))
-                        log_func(f"    ✅ Matched: {cue_file} → {audio_file_name}")
-                    # If not found directly, try case-insensitive search (for Linux compatibility)
-                    else:
-                        found = False
-                        for existing_file in filenames:
-                            if existing_file.lower() == audio_file_name.lower():
-                                audio_file_path = os.path.join(dirpath, existing_file)
-                                pairs.append((cue_path, audio_file_path, dirpath))
-                                log_func(f"    ✅ Matched (case-insensitive): {cue_file} → {existing_file}")
-                                found = True
-                                break
-                        
-                        if not found:
-                            log_func(f"    ❌ Audio file not found: {audio_file_name}")
-                            
-            except Exception as e:
-                log_func(f"    ⚠️  Error reading {cue_file}: {str(e)}")
-                pass
+            # Extract audio file references from the CUE
+            cue_sheet, audio_files = _extract_referenced_files_from_cue(cue_path, log_func)
+            
+            if not audio_files:
+                log_func(f"    ⚠️  No FILE directives found in {cue_file}")
+                continue
+            
+            log_func(f"    🔗 Found {len(audio_files)} audio file reference(s) in CUE")
+            
+            # Process based on whether it's single or multi-image CUE
+            if len(audio_files) > 1:
+                # Multi-image CUE: split into separate CUE files
+                new_pairs = _process_multi_image_cue(
+                    cue_path, cue_sheet, audio_files, dirpath, filenames, log_func
+                )
+                pairs.extend(new_pairs)
+            else:
+                # Single-image CUE: match directly
+                pair = _process_single_image_cue(
+                    cue_path, cue_file, audio_files[0], dirpath, filenames, log_func
+                )
+                if pair:
+                    pairs.append(pair)
     
     return pairs

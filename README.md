@@ -70,6 +70,7 @@ The Docker image supports configuration via environment variables:
 | `PAIR_THREADS` | Max parallel pair processing within a job | `2` |
 | `FORMAT` | Output audio format - `flac`, `mp3`, or `aac` | `flac` |
 | `NO_CLEANUP` | Keep original CUE and image files after processing - `true` or `false` | `false` |
+| `CUE_SPLITTER_DB` | Path to SQLite database file for job persistence | `/data/cue_splitter_jobs.db` |
 
 With custom configuration using environment variables:
 ```bash
@@ -78,6 +79,7 @@ docker build . -t cue-splitter
 docker run -d \
   -p 8080:8080 \
   -v /path/to/music:/music \
+  -v /path/to/data:/data \
   -e THREADS=8 \
   -e PAIR_THREADS=4 \
   -e FORMAT=mp3 \
@@ -86,10 +88,18 @@ docker run -d \
   cue-splitter
 ```
 
+**Volumes:**
+- `/music`: Mount your music directory here for processing
+- `/data`: Database storage for job persistence across container restarts
+
 **Note:** A pre-built public image is available at `edmur/cue-to-tracks-server:latest` if you don't want to build the image yourself.
 
 ```bash
-docker run -d -p 8080:8080 -v /path/to/music:/music edmur/cue-to-tracks-server:latest
+docker run -d \
+  -p 8080:8080 \
+  -v /path/to/music:/music \
+  -v /path/to/data:/data \
+  edmur/cue-to-tracks-server:latest
 ```
 
 ---
@@ -196,6 +206,44 @@ curl http://localhost:8080/status
   }
 }
 ```
+</details>
+
+---
+
+#### Check Specific Job Status
+
+```bash
+GET /status/<job_id>
+```
+
+<details>
+  <summary>Click to expand</summary>
+
+```bash
+curl http://localhost:8080/status/1
+```
+
+**Response:**
+```json
+{
+  "job_id": "1",
+  "status": "error",
+  "path": "/data/Downloads/out/lidarr/Iron Maiden - 1980 - Iron Maiden (Japanese TOCP-50691)",
+  "message": "all 1 pair(s) failed",
+  "log": "/tmp/cue_split_logs/1.log",
+  "details": [
+    {
+      "status": "error",
+      "message": "shnsplit failed with exit code 1",
+      "log": "/tmp/cue_split_logs/1.log",
+      "command": "shnsplit"
+    }
+  ]
+}
+```
+
+**Note:** Returns 404 if job ID doesn't exist.
+
 </details>
 
 ---

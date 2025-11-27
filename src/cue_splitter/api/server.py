@@ -1,15 +1,10 @@
 """HTTP server implementation"""
 import os
 import json
-import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from ..utils.helpers import safe_print
-
-
-# Global state for job tracking
-results = {}
-results_lock = threading.Lock()
+from ..utils.database import get_database
 
 
 class CueSplitHandler(BaseHTTPRequestHandler):
@@ -41,9 +36,9 @@ class CueSplitHandler(BaseHTTPRequestHandler):
                 safe_print(f"❌ Invalid request: {e}")
                 return self._json({"error": "invalid json"}, 400)
 
-            job_id = str(len(results) + 1)
-            with results_lock:
-                results[job_id] = {"status": "queued", "path": path}
+            db = get_database()
+            job_id = db.get_next_job_id()
+            db.create_job(job_id, path)
             
             if self.task_queue:
                 self.task_queue.put((job_id, path))
@@ -56,8 +51,17 @@ class CueSplitHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
         if self.path == "/status":
-            with results_lock:
-                return self._json(results)
+            db = get_database()
+            all_jobs = db.get_all_jobs()
+            return self._json(all_jobs)
+        elif self.path.startswith("/status/"):
+            job_id = self.path.split("/")[-1]
+            db = get_database()
+            job = db.get_job(job_id)
+            if job:
+                self._json({"job_id": job_id, **job})
+            else:
+                self._json({"error": "job not found"}, 404)
         elif self.path.startswith("/log/"):
             job_id = self.path.split("/")[-1]
             log_path = f"/tmp/cue_split_logs/{job_id}.log"
@@ -67,7 +71,7 @@ class CueSplitHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "log not found"}, 404)
         else:
-            self._json({"message": "endpoints: /process, /status, /log/<jobid>"}, 200)
+            self._json({"message": "endpoints: /process, /status, /status/<jobid>, /log/<jobid>"}, 200)
 
 
 def start_server(host, port, task_queue, shutdown_event):
@@ -91,9 +95,10 @@ def start_server(host, port, task_queue, shutdown_event):
     
     safe_print(f"🚀 Server listening on {host}:{port}")
     safe_print("📡 API Endpoints:")
-    safe_print("   POST /process    - Submit a new CUE split job")
-    safe_print("   GET  /status     - Check status of all jobs")
-    safe_print("   GET  /log/<id>   - Retrieve log for specific job")
+    safe_print("   POST /process       - Submit a new CUE split job")
+    safe_print("   GET  /status        - Check status of all jobs")
+    safe_print("   GET  /status/<id>   - Check status of specific job")
+    safe_print("   GET  /log/<id>      - Retrieve log for specific job")
     safe_print("=" * 60)
     safe_print("🟢 Server is ready to accept requests")
 
@@ -110,13 +115,12 @@ def start_server(host, port, task_queue, shutdown_event):
 
 
 def get_results():
-    """Get current job results (thread-safe)"""
-    with results_lock:
-        return dict(results)
+    """Get current job results from database"""
+    db = get_database()
+    return db.get_all_jobs()
 
 
 def update_result(job_id, updates):
-    """Update job result (thread-safe)"""
-    with results_lock:
-        if job_id in results:
-            results[job_id].update(updates)
+    """Update job result in database"""
+    db = get_database()
+    db.update_job(job_id, updates)
